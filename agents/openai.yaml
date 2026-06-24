@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image to PPT Batch"
+  short_description: "Recreate editable PPTs with batched visual assets"
+  default_prompt: "Use $image-to-ppt-batch to recreate this slide image as an editable PPTX with independently selectable text, layout, and visual assets."
