@@ -47,6 +47,58 @@ def choose_grid(
     return rows, cols
 
 
+def resolve_reuse(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return canonical generation assets and all placement instances.
+
+    An item without ``reuse_of`` is canonical. An item with ``reuse_of`` keeps
+    its own placement metadata but points to the target's generated PNG.
+    """
+    by_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for item in items:
+        item_id = str(item.get("id", "")).strip()
+        if not item_id:
+            raise ValueError("every visual must have a non-empty id")
+        if item_id in by_id:
+            raise ValueError(f"duplicate visual id: {item_id}")
+        by_id[item_id] = item
+
+    resolved: dict[str, str] = {}
+
+    def resolve_id(item_id: str, trail: tuple[str, ...] = ()) -> str:
+        if item_id in resolved:
+            return resolved[item_id]
+        if item_id in trail:
+            cycle = " -> ".join((*trail, item_id))
+            raise ValueError(f"reuse cycle: {cycle}")
+        item = by_id[item_id]
+        reuse_of = item.get("reuse_of")
+        if reuse_of is None or str(reuse_of).strip() == "":
+            resolved[item_id] = item_id
+            return item_id
+        target_id = str(reuse_of).strip()
+        if target_id not in by_id:
+            raise ValueError(f"{item_id}: reuse target not found: {target_id}")
+        root_id = resolve_id(target_id, (*trail, item_id))
+        resolved[item_id] = root_id
+        return root_id
+
+    canonical_assets: list[dict[str, Any]] = []
+    seen_assets: set[str] = set()
+    placements: list[dict[str, Any]] = []
+    for item_id, item in by_id.items():
+        asset_id = resolve_id(item_id)
+        if asset_id not in seen_assets:
+            canonical_assets.append(by_id[asset_id])
+            seen_assets.add(asset_id)
+        placement = dict(item)
+        placement["asset_id"] = asset_id
+        placement["asset_file"] = f"{asset_id}.png"
+        placements.append(placement)
+    return canonical_assets, placements
+
+
 def plan_batches(
     items: list[dict[str, Any]],
     *,
@@ -97,6 +149,39 @@ def plan_batches(
                 }
             )
     return batches
+
+
+def build_plan_document(
+    items: list[dict[str, Any]],
+    reference: Path,
+    *,
+    max_simple: int = DEFAULT_MAX_SIMPLE,
+    max_sensitive: int = DEFAULT_MAX_SENSITIVE,
+    min_cell: int = DEFAULT_MIN_CELL,
+    max_cols: int = DEFAULT_MAX_COLS,
+    max_rows: int = DEFAULT_MAX_ROWS,
+    group_simple_by_style: bool = False,
+) -> dict[str, Any]:
+    canonical_assets, placements = resolve_reuse(items)
+    batches = plan_batches(
+        canonical_assets,
+        max_simple=max_simple,
+        max_sensitive=max_sensitive,
+        min_cell=min_cell,
+        max_cols=max_cols,
+        max_rows=max_rows,
+        group_simple_by_style=group_simple_by_style,
+    )
+    return {
+        "reference": str(reference),
+        "counts": {
+            "unique_assets": len(canonical_assets),
+            "placement_instances": len(placements),
+            "reused_instances": len(placements) - len(canonical_assets),
+        },
+        "placements": placements,
+        "batches": batches,
+    }
 
 
 def infer_sensitivity(item: dict[str, Any]) -> str:
@@ -360,8 +445,9 @@ def write_json(path: Path, data: object) -> None:
 
 
 def command_plan(args: argparse.Namespace) -> None:
-    batches = plan_batches(
+    document = build_plan_document(
         load_items(args.inventory),
+        args.reference,
         max_simple=args.max_simple,
         max_sensitive=args.max_sensitive,
         min_cell=args.min_cell,
@@ -369,8 +455,18 @@ def command_plan(args: argparse.Namespace) -> None:
         max_rows=args.max_rows,
         group_simple_by_style=args.group_simple_by_style,
     )
-    write_json(args.out, {"reference": str(args.reference), "batches": batches})
-    print(json.dumps({"batches": len(batches), "generation_calls": len(batches)}, ensure_ascii=False))
+    write_json(args.out, document)
+    counts = document["counts"]
+    print(
+        json.dumps(
+            {
+                "batches": len(document["batches"]),
+                "generation_calls": len(document["batches"]),
+                **counts,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def command_contact_sheets(args: argparse.Namespace) -> None:
